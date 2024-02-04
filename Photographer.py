@@ -1,56 +1,107 @@
 import cv2
-import os
-import keyboard
+import numpy as np
 import time
+import os
 
-def get_last_image_index(folder_name):
-    index_file = os.path.join(folder_name, "last_index.txt")
-    if os.path.exists(index_file):
-        with open(index_file, "r") as file:
-            last_index = int(file.read())
-        return last_index
-    else:
+
+mtx = np.array([[237.21036929,   0.,        479.18796748],
+                [0.,         235.54517542, 366.09520559],
+                [0.,           0.,           1.]],dtype=np.float64)
+
+dist = np.array([[0.00978868],
+                [-0.03383362],
+                [0.03214306],
+                [-0.00745617]],dtype=np.float64)
+
+
+class Camera:
+    def __init__(self, width=1640, height=1232, flip=2, disp_width=960, disp_height=720,
+                 camera_matrix=mtx, camera_distortion=dist):
+        self.__width = width
+        self.__height = height
+        self.__flip = flip
+        self.__mtx = camera_matrix
+        self.__dist = camera_distortion
+        self.__dispW = disp_width
+        self.__dispH = disp_height
+        self.__gpu_mat = cv2.cuda_GpuMat()
+        try:
+            self.__mapx, self.__mapy = list(map(cv2.cuda_GpuMat, cv2.fisheye.initUndistortRectifyMap(
+                self.__mtx, self.__dist, None, self.__mtx,
+                (int(self.__dispH*1.5), int(self.__dispW*1.5)), 5)))
+        except:
+            self.__mapx, self.__mapy = cv2.fisheye.initUndistortRectifyMap(
+                self.__mtx, self.__dist, None, self.__mtx,
+                (int(self.__dispH*1.5), int(self.__dispW*1.5)), 5)
+        self.__image_counter = self.load_image_counter()
+
+    def load_image_counter(self):
+        counter_file_path = "image_counter.txt"
+        if os.path.exists(counter_file_path):
+            with open(counter_file_path, "r") as file:
+                return int(file.read())
         return 0
 
-def update_last_image_index(folder_name, last_index):
-    index_file = os.path.join(folder_name, "last_index.txt")
-    with open(index_file, "w") as file:
-        file.write(str(last_index))
+    def save_image_counter(self):
+        counter_file_path = "image_counter.txt"
+        with open(counter_file_path, "w") as file:
+            file.write(str(self.__image_counter))
 
-def capture_and_save_images():
-    folder_name = "images"
-    if not os.path.exists(folder_name):
-        os.makedirs(folder_name)
-        print(f"Folder '{folder_name}' created.")
+    def save_image(self, frame):
+        output_folder = "images"
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
 
-    last_index = get_last_image_index(folder_name)
-    img_index = last_index
+        image_filename = f"img{self.__image_counter}.png"
+        image_path = os.path.join(output_folder, image_filename)
+        cv2.imwrite(image_path, frame)
+        print(f"Image saved: {image_path}")
+        self.__image_counter += 1
+        self.save_image_counter()
 
-    cap = cv2.VideoCapture(0)
+    @property
+    def camset(self):
+        return f'nvarguscamerasrc !  video/x-raw(memory:NVMM), width={self.__width}, height={self.__height},' \
+               ' format=NV12, framerate=30/1 ! nvvidconv flip-method=' +\
+               str(self.__flip) + ' ! video/x-raw, width=' + str(self.__dispW) + ', height=' + str(self.__dispH) + \
+               ', format=BGRx !videoconvert ! video/x-raw, format=BGR ! appsink'
 
+    def undistort(self, frame):
+        try:
+            self.__gpu_mat.upload(frame)
+            undistorted = cv2.cuda.remap(
+                self.__gpu_mat, self.__mapx, self.__mapy, cv2.INTER_LINEAR)
+            cpu_undistorted_frame = undistorted.download()
+            output = cpu_undistorted_frame[:self.__dispH, :self.__dispW]
+        except:
+            undistorted = cv2.remap(
+                frame, self.__mapx, self.__mapy, cv2.INTER_LINEAR)
+            output = undistorted[:self.__dispH, :self.__dispW]
+        return output
+
+    def videocapture(self, camset=camset):
+        return cv2.VideoCapture(camset)
+
+
+webcam = Camera()
+
+cap = webcam.videocapture(webcam.camset)
+
+if True:
     while True:
+        t1 = time.time()
         ret, frame = cap.read()
-        cv2.imshow('Webcam Output', frame)
 
-        if keyboard.is_pressed('s'):
-            file_name = f"{folder_name}/img{img_index}.png"
-            cv2.imwrite(file_name, frame)
-            print(f"Image successfully saved: {file_name}")
-            img_index += 1
-            update_last_image_index(folder_name, img_index)
+        print(f'fps {1 / (time.time() - t1)}')
+        if ret:
+            cv2.imshow("camera", frame)
 
-            while keyboard.is_pressed('s'):
-                pass
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            key = cv2.waitKey(1)
+            if key == ord("q"):
+                break
+            elif key == ord("s"):
+                webcam.save_image(frame)
 
     cap.release()
     cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    capture_and_save_images()
-
-
-
 # by Aria 🐸
